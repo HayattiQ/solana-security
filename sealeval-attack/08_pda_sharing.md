@@ -140,3 +140,125 @@ pub fn secure_withdraw(ctx: Context<SecureWithdraw>, amount: u64) -> Result<()> 
    あるPDAの権限を別のPDAに漏らさないよう、各PDAの責任範囲を明確に分離します。
 
 PDAの適切な設計と使用は、Solanaプログラムのセキュリティにおいて非常に重要です。各PDAの権限範囲を明確に定義し、ユーザーごとに固有のPDAを使用することで、多くのセキュリティリスクを軽減できます。
+
+
+# 📝 監査手順書: PDA Sharing（PDAの不適切な共有）
+
+## 📌 監査目的
+- プログラム派生アドレス（PDA）がユーザー間や機能間で不適切に共有されていないことを確認する。
+- PDAの権限が正しくユーザーや用途ごとに分離されていることを保証する。
+
+## 🔎 監査観点
+監査者は以下の観点でコードを精査する。
+
+### 1. PDAのユニーク性の確認
+- PDA生成のためのシードがユーザーごと、または用途ごとに一意であることを確認する。
+
+### 2. PDAにおける権限者チェック
+- PDAの内部データに、操作を許可される権限者（ownerやauthority）が明示されており、適切に検証されていることを確認する。
+
+### 3. PDA署名 (signer_seeds) の正当性
+- CPI呼び出し等でPDAを署名者として使用する場合、署名するPDAが必ず正しい権限範囲のものであるかを確認する。
+
+## 📋 監査手順詳細（チェックリスト）
+
+### ✔️ Step 1: PDA生成時のシード設計確認
+- [ ] PDAの生成に使用されているシードがユーザー固有または用途固有であり、異なるユーザーや用途間で共有されていないことを確認する。
+
+**安全なシード設計例:**
+```rust
+#[account(
+    seeds = [b"user_data", user.key().as_ref()], 
+    bump
+)]
+pub user_data: Account<'info, UserData>,
+```
+
+**不適切なシード設計例（共通化しすぎ）:**
+```rust
+#[account(
+    seeds = [b"global_vault"], 
+    bump
+)]
+pub vault: Account<'info, Vault>,
+```
+
+### ✔️ Step 2: PDA内の権限者フィールドの確認
+- [ ] PDA内に権限者（authority, owner, creator等）のフィールドが存在し、それがAccounts構造体の`has_one`または`constraint`などで適切に検証されていることを確認する。
+
+**安全な例:**
+```rust
+#[derive(Accounts)]
+pub struct UpdateAccount<'info> {
+    #[account(
+        mut,
+        seeds = [b"user_account", authority.key().as_ref()],
+        bump,
+        has_one = authority
+    )]
+    pub user_account: Account<'info, UserAccount>,
+    pub authority: Signer<'info>,
+}
+```
+
+**不適切な例（権限者検証なし）:**
+```rust
+#[account(seeds = [b"user_account"], bump)]
+pub user_account: Account<'info, UserAccount>,
+```
+
+### ✔️ Step 3: CPI署名時のPDAシード確認
+- [ ] PDAを署名者としてCPI (invoke_signed) を行う際に、使用する`signer_seeds`が適切なユーザーやコンテキスト固有のものであり、不適切に共有されていないことを確認する。
+
+**安全なCPI署名例:**
+```rust
+let seeds = &[
+    b"user_vault",
+    user.key().as_ref(),
+    &[vault_bump]
+];
+invoke_signed(&ix, accounts, &[&seeds[..]])?;
+```
+
+**不適切なCPI署名例（共通のPDAを使用）:**
+```rust
+let seeds = &[
+    b"global_vault", // 全ユーザー共通のseed
+    &[vault_bump]
+];
+invoke_signed(&ix, accounts, &[&seeds[..]])?;
+```
+
+## 📂 確認するコード箇所（具体的な確認対象）
+- PDAを生成する全てのコード（AnchorのAccounts構造体の`#[account(seeds = [...])]`を含む）
+- PDAを署名者として利用しているCPI呼び出し箇所
+- PDAアカウントのデータ構造における権限フィールド（owner、authorityなど）が存在する全ての箇所
+
+## 💬 監査中に確認する質問例
+- 「PDA生成に用いられるシードは、ユーザーごとに固有のものでしょうか？　用途間で共通化されていませんか？」
+- 「PDA内に権限者が記録されている場合、それを実際に検証していますか？」
+- 「CPI署名時に使用されるPDAは、特定のユーザーやコンテキストに限定されていますか？ 共通化されたPDAが不適切に使われる恐れはありませんか？」
+
+## 🚨 リスク評価基準
+監査中に以下を検出した場合は重大な問題として報告する:
+
+- 全ユーザー共通またはコンテキスト間で共有されているPDAが、資産や権限操作を行う署名に用いられている場合（資産損失、データ改ざん等の可能性がある）。
+
+軽微だが改善推奨として報告すべき場合:
+
+- PDA内に権限者フィールドがあるが、`has_one`や`constraint`属性での検証が明示されていない場合（検証を推奨）。
+- シード設計がユーザー固有でない場合（将来的なリスク軽減のため改善を推奨）。
+
+## 🛠 推奨する修正方法
+
+- **PDAのシード設計改善:**
+  - ユーザー固有の情報（Pubkey等）をシードに含める
+  - 機能や用途ごとに異なるシードプレフィックスを使用する
+
+- **権限者検証の追加:**
+  - PDA内に権限者フィールドを追加する
+  - Accounts構造体で`has_one`や`constraint`を使用して検証する
+
+- **CPI署名の安全性向上:**
+  - ユーザー固有のPDAのみを署名に使用する
+  - 共通PDAの使用を避け、権限を適切に分離する

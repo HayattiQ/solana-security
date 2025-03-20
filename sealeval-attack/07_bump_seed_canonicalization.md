@@ -77,7 +77,6 @@ Solanaランタイムは、特定のシードとプログラムIDの組み合わ
 
 2. **Anchorの機能を活用する**
    - Anchorの`#[account(seeds = [...], bump)]`構文を使用する
-   - Anchorの`seeds_with_nonce`関数を使用してPDAを検証する
 
 3. **バンプ値の保存と再利用**
    - 初期化時に計算した正規のバンプ値をアカウントに保存する
@@ -90,3 +89,99 @@ Solanaランタイムは、特定のシードとプログラムIDの組み合わ
    - シードの長さと構成を慎重に設計する
 
 バンプシードの正規化は、一見すると些細な問題に見えますが、適切に実装しないとセキュリティ上の重大な脆弱性につながる可能性があります。常に正規のバンプを使用し、ユーザー提供の値を信頼しないことが重要です。
+
+
+# 📝 監査手順書: Bump Seed Canonicalization（PDAのBumpシード正規化）
+
+## 📌 監査目的
+- プログラム派生アドレス（PDA）の生成・検証において、正規（canonical）なバンプシードが必ず使用されることを保証する。
+- 攻撃者が任意のbump値を用いて、不正なPDAを指定・生成できないことを確認する。
+
+## 🔎 監査観点
+監査者は以下の観点でコードを精査する。
+
+### 1. PDA生成時のCanonicalなバンプ値の使用確認
+- Anchor非使用時：`Pubkey::find_program_address`を必ず利用しているか確認。
+- Anchor使用時：`#[account(seeds = [...], bump)]`が正しく使用されているか確認。
+
+### 2. ユーザー提供のバンプ値の再検証（Anchor非使用時）
+- ユーザー入力に依存したバンプ値を直接信頼せず、プログラム内で再計算したバンプ値と比較していることを確認する。
+
+### 3. 保存されたバンプ値の再利用の確認（該当する場合）
+- 初期化時に保存したバンプ値を後続の処理で使用する場合、再検証が行われていることを確認する。
+
+## 📋 監査手順詳細（チェックリスト）
+
+### ✔️ Step 1: PDA生成ロジックの確認（Anchor非使用の場合のみ）
+- [ ] PDA生成コードで、必ず`Pubkey::find_program_address`を使用しているか確認。
+- [ ] `Pubkey::create_program_address` を直接使用している場合、明確な理由と必要性が示されているか確認する（原則として`find_program_address`推奨）。
+- [ ] ユーザー提供のbump値を直接信用せず、内部で再計算して比較していることを確認。
+
+**安全なコード例:**
+```rust
+// 明示的にbumpを再検証（意図はセキュリティ向上のため）
+let (expected_pda, expected_bump) = Pubkey::find_program_address(&[seeds], ctx.program_id);
+require!(expected_pda == ctx.accounts.pda_account.key(), CustomError::InvalidPDA);
+require!(expected_bump == user_provided_bump, CustomError::InvalidBump);
+```
+
+### ✔️ Step 2: PDA生成ロジックの確認（Anchor使用の場合のみ）
+- [ ] Anchorを使用している場合、Accounts構造体内で`#[account(seeds = [...], bump)]`が正しく記述されているか確認する。
+- [ ] AnchorのPDA定義以外で、ユーザー提供のbumpを受け取るロジックがある場合、その必要性が明示的に示され、再検証されているか確認（通常はAnchorに任せるべき）。
+
+**安全なAnchorコード例:**
+```rust
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, seeds = [user.key().as_ref()], bump, payer = user)]
+    pub user_data: Account<'info, UserData>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+```
+
+### ✔️ Step 3: 保存したバンプ値の再利用確認（該当する場合）
+- [ ] 初期化時にアカウント内に保存したバンプ値を、後続処理で再検証して使用しているか確認する。
+
+**安全な例:**
+```rust
+// 保存されたbump値の再検証（改ざん防止のため）
+require!(stored_bump == recalculated_bump, CustomError::BumpMismatch);
+```
+
+### ✔️ Step 4: 明示的なコメントの確認（Anchor非使用など特殊な場合）
+- [ ] Anchor非使用時など、特別な理由で明示的にbump値を再検証している場合、コード内にその理由や意図をコメントで明記しているか確認する。
+- Anchor使用時（標準的な書き方）はコメント不要です。
+
+## 📂 確認するコード箇所（具体的な確認対象）
+- PDAを生成または検証する全ての関数・メソッド
+- Anchor使用時のAccounts構造体でのPDA定義
+- ユーザー提供のバンプ値を受け取っている箇所
+- バンプ値をアカウント内に保存・再利用している箇所
+
+## 💬 監査中に確認する質問例
+- 「PDAを生成する際は必ず`find_program_address`を使っていますか？`create_program_address`を使っている場合、その理由は？」
+- 「ユーザーが提供したバンプ値をプログラム内部で再計算・再検証していますか？」
+- 「アカウント内に保存したバンプ値を後続処理で使用する場合、再検証はしていますか？また、その理由は明記されていますか？」
+
+## 🚨 リスク評価基準
+監査中に以下を検出した場合は重大な問題として報告する:
+
+- Anchor非使用時に`create_program_address`を直接使い、ユーザー提供のbump値をそのまま検証せず使用している場合。
+- Anchorを使用しているにもかかわらず、`#[account(seeds = [...], bump)]`が未使用でユーザー入力に依存している場合。
+
+軽微だが改善推奨として報告すべき場合:
+
+- Anchor非使用時など特殊なロジックでbump値検証をしているが、その理由や意図がコメントで明示されていない場合（コメント追記を推奨）。
+
+## 🛠 推奨する修正方法
+
+- **Anchor使用時:**
+  - `#[account(seeds = [...], bump)]`構文を使用する
+  - バンプ値をアカウント内に保存し、後続処理で再利用する
+
+- **Anchor非使用時:**
+  - `create_program_address`ではなく`find_program_address`を使用する
+  - ユーザー提供のバンプ値を再検証する
+  - バンプ値の検証ロジックにコメントを追加する
