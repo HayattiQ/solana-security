@@ -162,3 +162,79 @@ Sysvarにアクセスする方法は主に3つあります：
    - 検証前にSysvarのデータにアクセスしない
 
 Sysvarアドレスの検証は、Solanaプログラムのセキュリティにおいて見落とされがちな重要な要素です。適切な検証を実装することで、偽のSysvarアカウントによる攻撃を効果的に防止できます。
+
+
+# 📝 監査手順書: Sysvar Address Checking（Sysvarアドレスの検証不足）
+
+## 📌 監査目的
+- Sysvar（システム変数）アカウントが正しいアドレスであることを確認する。
+- 偽造されたSysvarアカウントを利用した攻撃を防止する。
+
+## 🔎 監査観点
+監査者は以下の観点でコードを精査すること。
+
+1. **Sysvarアドレスの検証**
+   - Sysvarを利用する場合、必ずアドレスがSolana公式の定数（例: `sysvar::rent::ID`）と一致していることを確認する。
+
+2. **Anchor利用時のSysvar型安全性**
+   - Anchorを使用する場合、Sysvarアカウントは`Sysvar<'info, T>`型で宣言されているか確認する。
+
+3. **直接アクセスメソッドの利用**
+   - 可能な限り、`Rent::get()` や `Clock::get()` 等の直接アクセス方法を使用していることを確認する。
+
+## 📋 監査手順詳細（チェックリスト）
+
+### ✔️ Step 1: Anchorを使用したSysvar型の確認
+- `[ ]` Anchorを使用している場合、Sysvarアカウントは`Sysvar<'info, T>`型で宣言されていることを確認する。
+
+**安全な例（推奨）:**
+```rust
+#[derive(Accounts)]
+pub struct MyContext<'info> {
+    pub rent: Sysvar<'info, Rent>,
+    pub clock: Sysvar<'info, Clock>,
+}
+```
+
+### ✔️ Step 2: AccountInfo利用時の明示的なアドレス検証確認
+- `[ ]` 特殊な理由で`AccountInfo`としてSysvarを取得する場合、必ず明示的にアドレスが検証されていることを確認する。
+
+**安全な例:**
+```rust
+pub fn my_instruction(ctx: Context<MyContext>) -> Result<()> {
+    if ctx.accounts.rent.key() != solana_program::sysvar::rent::ID {
+        return Err(ProgramError::InvalidArgument.into());
+    }
+
+    let rent = Rent::from_account_info(&ctx.accounts.rent)?;
+    Ok(())
+}
+```
+
+### ✔️ Step 3: 直接アクセスメソッドの推奨使用確認
+- `[ ]` Sysvarを引数として渡さず、プログラム内で直接`Clock::get()`や`Rent::get()`を使用している場合、その方法が適切に実装されていることを確認する。
+
+**安全な例（推奨）:**
+```rust
+let clock = Clock::get()?;
+let rent = Rent::get()?;
+```
+
+## 📂 確認するコード箇所（具体的な確認対象）
+- AnchorのAccounts構造体内のSysvar宣言箇所
+- AccountInfoとしてSysvarを受け取っている全ての関数
+- Sysvarに直接アクセスしている関数（`Rent::get()`、`Clock::get()` などの使用箇所）
+
+## 💬 監査中に確認する質問例
+- 「Sysvarアカウントのアドレスが明示的に検証されていますか？」
+- 「Anchorを利用している場合、Sysvarアカウントは`Sysvar<'info, T>`型を利用していますか？」
+- 「Sysvarを直接プログラム内で取得する方法（`Clock::get()`等）は適切に使用されていますか？」
+
+## 🚨 リスク評価基準
+
+**重大な問題として報告すべき場合:**
+- `AccountInfo`型のSysvarアカウントに対して、アドレス検証が全く行われていない場合（攻撃者が偽造Sysvarを渡せる可能性がある）。
+
+**改善推奨として報告すべき場合:**
+- Anchorを使用しているにもかかわらず、Sysvarアカウントが`AccountInfo`で受け取られている場合（型安全性向上のため`Sysvar<'info, T>`型を推奨）。
+- 不必要にSysvarアカウントを引数として渡している場合（`Rent::get()`や`Clock::get()`の直接アクセスを推奨）。
