@@ -68,3 +68,121 @@ pub struct SecureLogBalance<'info> {
 - システムアカウントの場合、所有者がシステムプログラム（`system_program::id()`）であることを確認
 
 Anchorを使用する場合、適切な型（`Account<'info, TokenAccount>`など）と属性（`token::authority`、`token::mint`など）を使用することで、これらのチェックを自動化できます。また、`Program<'info, Token>`のような型を使用することで、プログラムIDの検証も自動的に行われます。
+
+
+# 📝 監査手順書: Owner Checks（所有者チェックの欠如）
+
+---
+
+## 📌 監査目的
+
+- アカウントの所有者（Owner）が期待通りのプログラムであることを保証する。
+- 偽造されたアカウントや、不正な所有者プログラムのアカウントによる攻撃を防止するための所有者チェックが適切に行われていることを確認する。
+
+---
+
+## 🔎 監査観点
+
+監査者は以下の観点でコードを精査する。
+
+### 1. SPLトークンアカウントやNFTアカウント等の所有者チェック
+
+- 所有者が `spl_token::id()` 等の適切なプログラムIDであることを確認する。
+- Anchor使用時、Account型を正しく使用し、自動的に所有者検証がなされているか確認する。
+
+### 2. PDA（プログラム派生アドレス）の所有者チェック
+
+- PDAが本プログラムを所有者として設定されていることを検証しているか確認する。
+
+### 3. CPI（プログラム間呼び出し）の場合の所有者チェック
+
+- CPI先のアカウント所有者が期待するプログラムIDかを検証していることを確認する。
+
+---
+
+## 📋 監査手順詳細（チェックリスト）
+
+### ✔️ Step 1: Accounts構造体の所有者チェック（Anchor使用時）
+
+- [ ] SPLトークンアカウントやMintアカウントはAnchorの `Account<'info, TokenAccount>` や `Account<'info, Mint>` 型を使用し、所有者チェックが暗黙的に行われていることを確認する。
+- [ ] 必要に応じて `#[account(token::authority = ..., token::mint = ...)]` などの属性で所有者の関連付けを明示的に検証していることを確認する。
+
+**良い例:**
+
+```rust
+#[derive(Accounts)]
+pub struct TransferTokens<'info> {
+    #[account(mut, token::authority = from_authority, token::mint = mint)]
+    pub from: Account<'info, TokenAccount>,
+    pub from_authority: Signer<'info>,
+    pub mint: Account<'info, Mint>,
+}
+```
+
+### ✔️ Step 2: Accountsの所有者の明示的検証（Anchor未使用時）
+
+- [ ] `AccountInfo`型を使用する場合、プログラム内でアカウントの `.owner` フィールドを明示的に検証していることを確認する。
+- [ ] 検証結果が不一致の場合、適切なエラーを返すことを確認する。
+
+**良い例:**
+
+```rust
+if token_account.owner != &spl_token::id() {
+    return Err(ErrorCode::InvalidOwner.into());
+}
+```
+
+### ✔️ Step 3: PDAに関する所有者チェック
+
+- [ ] PDA生成時に、所有者が自プログラム（`ctx.program_id`）になっていることを確認する。
+
+**良い例:**
+
+```rust
+let (pda, _) = Pubkey::find_program_address(&[b"vault"], ctx.program_id);
+if vault_account.owner != ctx.program_id {
+    return Err(ErrorCode::InvalidPDAOwner.into());
+}
+```
+
+---
+
+## 📂 確認するコード箇所（具体的な確認対象）
+
+- Anchorを使った`Accounts`構造体内での`Account`型の定義箇所
+- Anchor未使用時のインストラクション関数内で`AccountInfo`型を扱う箇所
+- PDAを生成または検証するすべてのコード箇所
+- CPIによって他プログラムを呼び出す際に渡されるアカウントの所有者検証箇所
+
+---
+
+## 💬 監査中に確認する質問例
+
+- 「このトークンアカウントのOwnerがSPLトークンプログラムであることを保証していますか？」
+- 「PDAの所有者が本プログラムであることを検証していますか？」
+- 「外部プログラム（CPI）への呼び出し時に、アカウントのOwnerを明示的にチェックしていますか？」
+
+---
+
+## 🚨 リスク評価基準
+
+監査中に以下を検出した場合は重大な問題として報告する:
+
+- SPLトークンやMintアカウントの所有者が全く検証されていない
+- PDA生成時に所有者が自プログラムか検証されていない
+- CPIを呼び出す際に、渡されたアカウントの所有者を一切検証していない
+- `AccountInfo`型を使用しているが、所有者のチェックが全く行われていない
+
+---
+
+## 🛠 推奨する修正方法
+
+- **Anchor使用の場合:**
+  - 適切な型（`Account<'info, TokenAccount>`など）を使用する
+  - `token::authority`、`token::mint`などの属性を追加する
+
+- **Anchor未使用の場合:**
+  - 明示的なチェック（`if account.owner != &expected_program_id`）をコードに追加する
+
+- **PDAを使用する場合:**
+  - PDAの所有者が自プログラムであることを確認する
