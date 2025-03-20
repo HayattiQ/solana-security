@@ -63,3 +63,145 @@ pub struct SecureAuthorization<'info> {
 3. PDAsを使用する場合でも、そのPDAに関連付けられた権限者の検証を怠らない
 
 Anchorフレームワークを使用すると、`has_one`や`constraint`などの属性を通じて、これらのチェックを宣言的に記述できるため、人為的なミスを減らすことができます。
+
+
+# 📝 監査手順書: Signer Authorization（署名者チェックの欠如）
+
+---
+
+## 📌 監査目的
+
+- プログラム内で、操作を実行する署名者が適切に検証されているかを確認する。
+- 不適切な署名者がデータや資産に対して変更や操作を行うことができないことを保証する。
+
+---
+
+## 🔎 監査観点
+
+監査者は以下の観点でコードを精査する。
+
+### 1. Accounts構造体の署名者チェック（Anchor使用時）
+
+- `Signer<'info>`型を適切に使っているか。
+- Anchorの`has_one`属性や`constraint`属性を使い、署名者とアカウント内の権限者フィールドの整合性を強制的にチェックしているか。
+
+### 2. プログラム内ロジックの署名者チェック（Anchor未使用時）
+
+- 署名者（Signer）のPubkeyがアカウント内の権限者フィールド（authorityなど）と明示的に比較されているか。
+- 比較結果が不一致の場合にエラー（例: `Unauthorized`）が返されるか。
+
+### 3. PDA（プログラム派生アドレス）を使用した場合の権限チェック
+
+- PDAのauthorityフィールドが署名者と一致しているか。
+- Seedsを用いて適切な署名（signer_seeds）を確認しているか。
+
+---
+
+## 📋 監査手順詳細（チェックリスト）
+
+### ✔️ Step 1: Accounts構造体の精査（Anchorの場合）
+
+- [ ] `#[derive(Accounts)]`が付与された構造体をすべて確認する。
+- [ ] Accounts構造体内で、権限を要求するアカウント（例: Escrow, Vaultなど）に対し、適切な`has_one`や`constraint`属性が設定されていることを確認する。
+- [ ] `Signer<'info>`がAccounts構造体に含まれているか確認する。
+
+**確認例:**
+
+```rust
+#[derive(Accounts)]
+pub struct SecureAuthorization<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut, has_one = authority)]  // authorityチェックが明示的に指定されている
+    pub escrow: Account<'info, Escrow>,
+}
+
+### ✔️ Step 1: Accounts構造体の精査（Anchorの場合）
+
+- [ ] `#[derive(Accounts)]`が付与された構造体をすべて確認する。
+- [ ] Accounts構造体内で、権限を要求するアカウント（例: Escrow, Vaultなど）に対し、適切な`has_one`や`constraint`属性が設定されていることを確認する。
+- [ ] `Signer<'info>`がAccounts構造体に含まれているか確認する。
+
+**確認例:**
+
+```rust
+#[derive(Accounts)]
+pub struct SecureAuthorization<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut, has_one = authority)]  // authorityチェックが明示的に指定されている
+    pub escrow: Account<'info, Escrow>,
+}
+
+### ✔️ Step 2: ロジック内の権限者検証（Anchor・非Anchor両方）
+
+- [ ] 各インストラクション関数を確認し、署名者（`authority.key()`）と対象アカウント内の権限フィールド（`account.authority`）が明示的に比較されていることを確認する。
+- [ ] 権限チェックが行われないまま重要なフィールドが変更される箇所がないことを確認する。
+
+**危険なコード例:**
+
+```rust
+// ❌ 署名者の検証がない
+pub fn insecure_authorization(ctx: Context<InsecureAuthorization>, data: u8) -> Result<()> {
+    ctx.accounts.escrow.data = data;
+    Ok(())
+}
+
+**安全なコード例:**
+
+```rust
+
+// ✅ 署名者を明示的に検証
+pub fn secure_authorization(ctx: Context<SecureAuthorization>, data: u8) -> Result<()> {
+    require!(ctx.accounts.escrow.authority == ctx.accounts.authority.key(), Unauthorized);
+    ctx.accounts.escrow.data = data;
+    Ok(())
+}
+
+### ✔️ Step 3: PDAに関する権限チェック
+
+- [ ] PDAをAuthorityとして使用する場合、PDAの署名（`signer_seeds`）を適切に行い、署名者との関連付けが明示的に行われていることを確認する。
+- [ ] PDA内の`authority`フィールドが署名者と一致することがコードで明示的に検証されているか確認する。
+
+**確認例（PDAの場合）:**
+
+```rust
+let seeds = &[b"escrow", authority.key().as_ref(), &[bump]];
+let signer = &[&seeds[..]];
+invoke_signed(&instruction, accounts, signer)?;
+
+## 📂 確認するコード箇所（具体的な確認対象）
+
+- 各インストラクション関数の冒頭部
+- `#[derive(Accounts)]`構造体内の各アカウント定義
+- PDAを生成または利用しているすべての箇所
+- 特にデータ更新やSOLの移動、トークンの転送などの重要な操作を行う箇所
+
+---
+
+## 💬 監査中に確認する質問例
+
+- 「このインストラクションを呼び出せる署名者は誰か？」
+- 「アカウント内の権限フィールド（authorityなど）は、署名者と明確に関連付けられているか？」
+- 「この操作を意図しない署名者が実行できる可能性はないか？」
+
+---
+
+## 🚨 リスク評価基準
+
+監査中に以下を検出した場合は重大な問題として報告する:
+
+- 署名者の検証がまったく存在しない
+- 権限をもつアカウントが署名者と関連付けられていない
+- PDAの署名検証が不足しており、悪意ある署名が可能となっている
+
+---
+
+## 🛠 推奨する修正方法
+
+- **Anchor使用の場合:**
+  - `has_one`や`constraint`属性を追加する。
+
+- **Anchor未使用の場合:**
+  - 明示的なチェック（`require!`や`assert_eq!`）をコードに追加する。
+
+- **PDAを使用する場合:**
+  - `signer_seeds`を必ず使い、authorityフィールドとの比較を追加する。
